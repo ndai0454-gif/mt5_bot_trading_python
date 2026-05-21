@@ -4,10 +4,9 @@ from tkinter import ttk, scrolledtext
 import threading
 import queue
 from datetime import datetime, timezone
-from typing import Callable, Dict
+from typing import Callable, Dict, Any, List
 
-
-# ── Design tokens ─────────────────────────────────────────────────────────────
+# ── Design tokens (GitHub Dark Theme) ──────────────────────────────────────────
 C = {
     "bg":          "#0d1117",
     "card":        "#161b22",
@@ -56,8 +55,9 @@ FILTERS = {
 }
 
 
+# ─── Helper UI components ─────────────────────────────────────────────────────
+
 def _card(parent, title: str, pady_top=10) -> tk.Frame:
-    """Bordered card widget. Returns the inner content frame."""
     outer = tk.Frame(parent, bg=C["border"], padx=1, pady=1)
     outer.pack(fill="x", pady=(0, 8))
     inner = tk.Frame(outer, bg=C["card"])
@@ -69,9 +69,7 @@ def _card(parent, title: str, pady_top=10) -> tk.Frame:
     tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", padx=14)
     return inner
 
-
 def _row(parent, label: str, value: str = "--", label_w=18) -> tk.Label:
-    """Key-value row. Returns the value Label for later updates."""
     f = tk.Frame(parent, bg=C["card"])
     f.pack(fill="x", padx=14, pady=3)
     tk.Label(f, text=label, bg=C["card"], fg=C["sub"],
@@ -80,7 +78,6 @@ def _row(parent, label: str, value: str = "--", label_w=18) -> tk.Label:
                  font=(F_MONO, 10, "bold"), anchor="e")
     v.pack(side="right")
     return v
-
 
 def _spacer(parent, h=6):
     tk.Frame(parent, bg=C["card"], height=h).pack()
@@ -96,24 +93,25 @@ class Dashboard:
         self._ui_thread_id = threading.get_ident()
 
         self.root = tk.Tk()
-        self.root.title("XAUUSD Scalping Bot")
+        self.root.title("XAUUSD Scalping Bot Professional")
         self.root.configure(bg=C["bg"])
         self.root.geometry("1200x820")
         self.root.minsize(900, 600)
+
+        # Trạng thái giá để làm hiệu ứng nhấp nháy (Flash)
+        self._prev_price = 0.0
 
         self._setup_styles()
         self._build()
         self._poll_ui()
         self._poll_log()
 
-    # ─── ttk styles ──────────────────────────────────────────────────────────
-
     def _setup_styles(self):
         s = ttk.Style()
         s.theme_use("clam")
         s.configure("T.Treeview",
             background=C["card"], foreground=C["text"],
-            fieldbackground=C["card"], rowheight=24,
+            fieldbackground=C["card"], rowheight=28,
             font=(F_MONO, 9), borderwidth=0,
         )
         s.configure("T.Treeview.Heading",
@@ -125,36 +123,28 @@ class Dashboard:
             foreground=[("selected", C["blue"])],
         )
 
-    # ─── Top-level layout ─────────────────────────────────────────────────────
-
     def _build(self):
         self._build_header()
         tk.Frame(self.root, bg=C["border"], height=1).pack(fill="x")
         self._build_perf_strip()
         tk.Frame(self.root, bg=C["border"], height=1).pack(fill="x")
 
-        # Body: left main + fixed right sidebar
         body = tk.Frame(self.root, bg=C["bg"])
         body.pack(fill="both", expand=True)
 
-        # Right sidebar (log) — fixed width, pack first so it doesn't get squeezed
         sidebar = tk.Frame(body, bg=C["bg"], width=300)
         sidebar.pack(side="right", fill="y", padx=(0, 10), pady=10)
         sidebar.pack_propagate(False)
         self._build_sidebar(sidebar)
 
-        # Left main content
         main = tk.Frame(body, bg=C["bg"])
         main.pack(side="left", fill="both", expand=True, padx=10, pady=10)
         self._build_main(main)
-
-    # ─── Performance strip ───────────────────────────────────────────────────
 
     def _build_perf_strip(self):
         strip = tk.Frame(self.root, bg=C["card"], height=72)
         strip.pack(fill="x")
         strip.pack_propagate(False)
-
         inner = tk.Frame(strip, bg=C["card"])
         inner.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -188,14 +178,11 @@ class Dashboard:
         _divider()
         self._perf_avg     = _stat("AVG TRADE",      "$0.00",  C["sub"])
 
-    # ─── Header bar ───────────────────────────────────────────────────────────
-
     def _build_header(self):
         hdr = tk.Frame(self.root, bg=C["header"], height=50)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
 
-        # Brand
         b = tk.Frame(hdr, bg=C["header"])
         b.pack(side="left", padx=16, pady=0)
         b.place(relx=0, rely=0.5, anchor="w", x=16)
@@ -207,7 +194,6 @@ class Dashboard:
                  bg=C["header"], fg=C["muted"],
                  font=(F_UI, 8)).pack(side="left", padx=(10, 0))
 
-        # Right cluster
         r = tk.Frame(hdr, bg=C["header"])
         r.place(relx=1.0, rely=0.5, anchor="e", x=-16)
         self._lbl_conn = tk.Label(r, text="● DISCONNECTED",
@@ -223,16 +209,12 @@ class Dashboard:
                                    font=(F_MONO, 9))
         self._lbl_time.pack(side="right")
 
-        # State badge — centered
         self._lbl_state = tk.Label(hdr, text="● STOPPED",
                                     bg=C["header"], fg=C["STOPPED"],
                                     font=(F_UI, 11, "bold"))
         self._lbl_state.place(relx=0.5, rely=0.5, anchor="center")
 
-    # ─── Left main area ───────────────────────────────────────────────────────
-
     def _build_main(self, parent):
-        # Row 1: Account + Market side by side
         row1 = tk.Frame(parent, bg=C["bg"])
         row1.pack(fill="x")
 
@@ -267,7 +249,6 @@ class Dashboard:
         self._trades_val  = _row(bot, "Positions",label_w=14)
         _spacer(bot)
 
-        # Row 2: Indicators strip
         ind_outer = tk.Frame(parent, bg=C["border"], padx=1, pady=1)
         ind_outer.pack(fill="x", pady=(8, 0))
         ind = tk.Frame(ind_outer, bg=C["card"])
@@ -288,11 +269,9 @@ class Dashboard:
                     self._box_rsi, self._box_atr, self._box_sig):
             box["f"].pack(side="left", padx=(0, 6))
 
-        # Row 3: Filters + Controls side by side
         row3 = tk.Frame(parent, bg=C["bg"])
         row3.pack(fill="x", pady=(8, 0))
 
-        # Filters
         flt_outer = tk.Frame(row3, bg=C["border"], padx=1, pady=1)
         flt_outer.pack(side="left", fill="both", expand=True, padx=(0, 8))
         flt = tk.Frame(flt_outer, bg=C["card"])
@@ -312,7 +291,6 @@ class Dashboard:
                         padx=(0, 4) if c == 0 else 0, pady=2)
             self._fw[key] = w
 
-        # Controls
         ctrl_outer = tk.Frame(row3, bg=C["border"], padx=1, pady=1, width=210)
         ctrl_outer.pack(side="right", fill="y")
         ctrl_outer.pack_propagate(False)
@@ -339,7 +317,6 @@ class Dashboard:
                                      command=self._close_all)
         self._btn_close.pack(fill="x")
 
-        # Row 4: Open positions
         pos_outer = tk.Frame(parent, bg=C["border"], padx=1, pady=1)
         pos_outer.pack(fill="both", expand=True, pady=(8, 0))
         pos = tk.Frame(pos_outer, bg=C["card"])
@@ -356,8 +333,6 @@ class Dashboard:
         self._tree.tag_configure("long",  foreground=C["green"])
         self._tree.tag_configure("short", foreground=C["red"])
         self._tree.pack(fill="both", expand=True, padx=14, pady=(4, 12))
-
-    # ─── Right sidebar (log) ──────────────────────────────────────────────────
 
     def _build_sidebar(self, parent):
         outer = tk.Frame(parent, bg=C["border"], padx=1, pady=1)
@@ -379,8 +354,6 @@ class Dashboard:
         self._log.tag_configure("WARN",  foreground=C["yellow"])
         self._log.tag_configure("ERROR", foreground=C["red"])
         self._log.tag_configure("TRADE", foreground=C["green"])
-
-    # ─── Widget helpers ───────────────────────────────────────────────────────
 
     def _section_title(self, parent, text: str):
         f = tk.Frame(parent, bg=C["card"])
@@ -497,10 +470,7 @@ class Dashboard:
             self._spread_val.config(text=f"{spread:.0f} pts",
                                      fg=C["red"] if spread > 25 else C["green"])
             self._atr_val.config(text=f"{data.get('atr', 0):.3f}", fg=C["text"])
-            price = data.get("price", 0)
-            if price:
-                self._price_val.config(text=f"{price:,.2f}", fg=C["text"])
-
+            
             direction = data.get("direction", "NEUTRAL")
             if direction == "LONG":
                 self._box_sig["v"].config(text="▲ LONG", fg=C["green"])
@@ -517,12 +487,27 @@ class Dashboard:
         self._run_on_ui(_apply)
 
     def update_price(self, bid: float, ask: float, spread: float):
+        """Cập nhật giá real-time với hiệu ứng nhấp nháy màu (Flash)."""
         price = (bid + ask) / 2
-        spread_color = C["red"] if spread > 25 else C["green"]
-
+        
         def _apply():
-            self._price_val.config(text=f"{price:,.2f}", fg=C["text"])
+            # Xác định hướng giá thay đổi so với lần cập nhật trước
+            if price > self._prev_price:
+                color = C["green"]
+            elif price < self._prev_price:
+                color = C["red"]
+            else:
+                color = C["text"]
+
+            self._price_val.config(text=f"{price:,.2f}", fg=color)
+            
+            # Trả về màu mặc định sau 200ms
+            self.root.after(200, lambda: self._price_val.config(fg=C["text"]))
+            
+            spread_color = C["red"] if spread > 25 else C["green"]
             self._spread_val.config(text=f"{spread:.0f} pts", fg=spread_color)
+            
+            self._prev_price = price
 
         self._run_on_ui(_apply)
 
@@ -541,12 +526,16 @@ class Dashboard:
         self._run_on_ui(_apply)
 
     def update_positions(self, trades: list):
-        rows = []
-        for t in trades:
-            tag = "long" if t.direction == "LONG" else "short"
-            rows.append((
-                tag,
-                (
+        """Cập nhật toàn bộ bảng vị thế."""
+        def _apply():
+            for item in self._tree.get_children():
+                self._tree.delete(item)
+            
+            self._trades_val.config(text=str(len(trades)), fg=C["text"])
+            
+            for t in trades:
+                tag = "long" if t.direction == "LONG" else "short"
+                vals = (
                     t.ticket,
                     "▲ BUY" if t.direction == "LONG" else "▼ SELL",
                     f"{t.lot_remaining:.2f}",
@@ -556,36 +545,28 @@ class Dashboard:
                     f"{t.tp2:.2f}",
                     f"{t.tp3:.2f}",
                     f"${t.realized_pnl:+,.2f}" if t.realized_pnl else "--",
-                ),
-            ))
-
-        def _apply():
-            for item in self._tree.get_children():
-                self._tree.delete(item)
-            self._trades_val.config(text=str(len(rows)), fg=C["text"])
-            for tag, values in rows:
-                self._tree.insert("", "end", tags=(tag,), values=values)
+                )
+                self._tree.insert("", "end", tags=(tag,), values=vals)
         self._run_on_ui(_apply)
 
     def update_position_pnl(self, pnls: dict):
-        """Update only the P&L column for open positions (ticket → pnl map)."""
+        """Update real-time P&L cho từng ticket mà không load lại bảng."""
         def _apply():
             for item in self._tree.get_children():
                 vals = self._tree.item(item, "values")
-                if not vals:
-                    continue
+                if not vals: continue
                 try:
                     ticket = int(vals[0])
+                    if ticket in pnls:
+                        pnl_val = pnls[ticket]
+                        new_vals = list(vals)
+                        new_vals[8] = f"${pnl_val:+,.2f}"
+                        self._tree.item(item, values=new_vals)
                 except (ValueError, IndexError):
                     continue
-                if ticket in pnls:
-                    new_vals = list(vals)
-                    new_vals[8] = f"${pnls[ticket]:+,.2f}"
-                    self._tree.item(item, values=new_vals)
         self._run_on_ui(_apply)
 
     def update_performance(self, stats: dict):
-        """Update the today's performance strip with stats from RiskManager."""
         def _apply():
             pnl   = stats.get("total_pnl",    0.0)
             total = stats.get("total_trades",  0)
@@ -597,7 +578,7 @@ class Dashboard:
             avg   = stats.get("avg_trade",     0.0)
 
             pnl_color = C["green"] if pnl > 0 else C["red"] if pnl < 0 else C["sub"]
-            self._perf_pnl.config(    text=f"${pnl:+,.2f}",  fg=pnl_color)
+            self._perf_pnl.config(    text=f"${pnl:+,. queC,.2f}",  fg=pnl_color)
             self._perf_trades.config( text=str(total),         fg=C["text"])
             self._perf_wins.config(   text=str(wins),          fg=C["green"] if wins > 0 else C["muted"])
             self._perf_losses.config( text=str(loss),          fg=C["red"]   if loss > 0 else C["muted"])
@@ -613,8 +594,6 @@ class Dashboard:
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
         self._q.put((ts, message, level))
 
-    # ─── Internal ─────────────────────────────────────────────────────────────
-
     def _poll_ui(self):
         try:
             while not self._ui_q.empty():
@@ -622,7 +601,7 @@ class Dashboard:
                 fn()
         except Exception:
             pass
-        self.root.after(50, self._poll_ui)
+        self.root.after(30, self._poll_ui)
 
     def _poll_log(self):
         try:
