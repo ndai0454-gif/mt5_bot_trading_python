@@ -61,7 +61,7 @@ class ManagedTrade:
 
         pnl = self.pnl_for_volume(exit_price, volume)
         self.realized_pnl = round(self.realized_pnl + pnl, 2)
-        self.closed_lots = round(self.closed_lots + volume, 4) # Tăng độ chính xác
+        self.closed_lots = round(self.closed_lots + volume, 4) 
         self.lot_remaining = round(max(0.0, self.lot_remaining - volume), 4)
         return pnl
 
@@ -72,7 +72,6 @@ class TradeManager:
         self.connector = connector
         self.risk_manager = risk_manager
         self._trades: List[ManagedTrade] = []
-        # Lấy lot_step từ config (ví dụ: 0.01 cho Standard, 0.1 cho một số chỉ số)
         self.lot_step = self.cfg.get("lot_step", 0.01)
 
     def add_trade(self, trade: ManagedTrade):
@@ -94,12 +93,12 @@ class TradeManager:
         if volume <= 0:
             return None
 
-        # Gửi lệnh đóng lên sàn
+        # Gửi lệnh đóng lên sàn (MockConnector sẽ trả về True)
         res = self.connector.close_partial(trade.ticket, volume, trade.symbol, trade.direction)
         if not res:
             return None
 
-        # Nếu connector trả về giá khớp thực tế (fill_price), ưu tiên dùng giá đó
+        # Lấy giá khớp thực tế nếu có
         fill_price = res.get("fill_price", price) if isinstance(res, dict) else price
 
         pnl = trade.book_close(volume, fill_price)
@@ -109,100 +108,115 @@ class TradeManager:
         )
         return pnl
 
-    def monitor(self, current_price: float, df=None, signal_engine=None, price_by_ticket: Optional[dict] = None) -> List[dict]:
+    def monitor(self, current_price: float, price_high: float, price_low: float, df=None, signal_engine=None) -> List[dict]:
         """
-        Check all managed trades against current price.
-        Returns list of events (partial closes, SL moves, reversals).
+        CẬP NHẬT: Kiểm tra tất cả các lệnh dựa trên giá Close, High và Low.
+        Giải quyết lỗi TypeError trong backtest.py.
         """
         events = []
-        price_by_ticket = price_by_ticket or {}
         for trade in list(self._trades):
-            trade_price = price_by_ticket.get(trade.ticket, current_price)
-            trade_events = self._check_trade(trade, trade_price, df, signal_engine)
+            # Truyền đầy đủ High/Low vào để check SL/TP chính xác
+            trade_events = self._check_trade(trade, current_price, price_high, price_low, df, signal_engine)
             events.extend(trade_events)
         return events
 
-    def _check_trade(self, trade: ManagedTrade, price: float, df: Any, signal_engine: Any) -> List[dict]:
+    def _check_trade(self, trade: ManagedTrade, price: float, phigh: float, plow: float, df: Any, signal_engine: Any) -> List[dict]:
         events = []
         direction = trade.direction
 
-        # --- TP1 ---
-        if not trade.tp1_hit and self._tp_hit(price, trade.tp1, direction):
+        # --- 1. KIỂM TRA STOP LOSS (ƯU TIÊN CAO NHẤT) ---
+        # Nếu Long: check giá Low chạm SL. Nếu Short: check giá High chạm SL.
+        sl_hit = False
+        if direction == "LONG" and plow <= trade.sl:
+            sl_hit = True
+        elif direction == "SHORT" and phigh >= trade.sl:
+            sl_hit = True
+        
+        if sl_hit:
+            close_vol = trade.lot_remaining
+            pnl = self._close_and_book(trade, close_vol, trade.sl)
+            if pnl is not None:
+                logger.info(f"❌ STOP LOSS hit ticket={trade.ticket} at {trade.sl:.2f} | pnl={pnl:.2f}")
+                events.append({"type": "SL", "ticket": trade.ticket, "volume": close_vol, "pnl": pnl})
+                self._finalize_trade(trade, trade.sl)
+                return events # Dính SL thì đóng toàn bộ, không check TP nữa
+
+        # --- 2. KIỂM TRA TAKE PROFIT (Sử dụng High/Low) ---
+        # Xác định giá trigger TP dựa trên High/Low
+        tp_trigger_price = price
+        if direction == "LONG":
+            # Nếu High vượt quá TP, ta chốt tại đúng giá TP
+            if phigh >= trade.tp1 and not trade.tp1_hit: tp_trigger_price = trade.tp1
+            elif phigh >= trade.tp2 and not trade.tp2_hit: tp_trigger_price = trade.tp2
+            elif phigh >= trade.tp3 and not trade.tp3_hit: tp_trigger_price = trade.tp3
+        else: # SHORT
+            # Nếu Low thấp hơn TP, ta chốt tại đúng giá TP
+            if plow <= trade.tp1 and not trade.tp1_hit: tp_trigger_price = trade.tp1
+            elif plow <= trade.tp2 and not trade.tp2_hit: tp_trigger_price = trade.tp2
+            elif plow <= trade.tp3 and not trade.tp3_hit: tp_trigger_price = trade.tp3
+
+        # TP1
+        if not trade.tp1_hit and self._tp_hit(tp_trigger_price, trade.tp1, direction):
             close_vol = self._partial_volume(trade, self.cfg["tp1_close_percent"])
-            pnl = self._close_and_book(trade, close_vol, price)
+            pnl = self._close_and_book(trade, close_vol, tp_trigger_price)
             if pnl is not None:
                 trade.tp1_hit = True
-                logger.info(f"TP1 hit ticket={trade.ticket} closed={close_vol:.2f}L")
                 events.append({"type": "TP1", "ticket": trade.ticket, "volume": close_vol, "pnl": pnl})
 
-        # --- TP2 + Breakeven ---
-        if trade.tp1_hit and not trade.tp2_hit and self._tp_hit(price, trade.tp2, direction):
+        # TP2 + Breakeven
+        if trade.tp1_hit and not trade.tp2_hit and self._tp_hit(tp_trigger_price, trade.tp2, direction):
             close_vol = self._partial_volume(trade, self.cfg["tp2_close_percent"])
-            pnl = self._close_and_book(trade, close_vol, price)
+            pnl = self._close_and_book(trade, close_vol, tp_trigger_price)
             if pnl is not None:
                 trade.tp2_hit = True
-                logger.info(f"TP2 hit ticket={trade.ticket} closed={close_vol:.2f}L")
+                if not trade.breakeven_set:
+                    if self.connector.modify_sl(trade.ticket, trade.entry_price):
+                        trade.sl = trade.entry_price
+                        trade.breakeven_set = True
+                        events.append({"type": "BREAKEVEN", "ticket": trade.ticket})
                 events.append({"type": "TP2", "ticket": trade.ticket, "volume": close_vol, "pnl": pnl})
 
-            if not trade.breakeven_set:
-                if self.connector.modify_sl(trade.ticket, trade.entry_price):
-                    trade.sl = trade.entry_price
-                    trade.breakeven_set = True
-                    logger.info(f"Breakeven set ticket={trade.ticket} SL={trade.entry_price:.2f}")
-                    events.append({"type": "BREAKEVEN", "ticket": trade.ticket})
-
-        # --- TP3 (Close All Remaining) ---
-        if trade.tp2_hit and not trade.tp3_hit and self._tp_hit(price, trade.tp3, direction):
+        # TP3
+        if trade.tp2_hit and not trade.tp3_hit and self._tp_hit(tp_trigger_price, trade.tp3, direction):
             if trade.lot_remaining > 0:
                 close_vol = trade.lot_remaining
-                pnl = self._close_and_book(trade, close_vol, price)
+                pnl = self._close_and_book(trade, close_vol, tp_trigger_price)
                 if pnl is not None:
                     trade.tp3_hit = True
-                    logger.info(f"TP3 hit ticket={trade.ticket} — fully closed")
                     events.append({"type": "TP3", "ticket": trade.ticket, "volume": close_vol, "pnl": pnl})
 
-        # --- EMA Reversal Exit ---
+        # --- 3. EMA REVERSAL EXIT (Sử dụng giá Close hiện tại) ---
         if df is not None and signal_engine is not None and not trade.tp3_hit:
             if signal_engine.check_ema_reversal(df, direction):
                 if trade.lot_remaining > 0:
                     close_vol = trade.lot_remaining
                     pnl = self._close_and_book(trade, close_vol, price)
                     if pnl is not None:
-                        logger.info(f"EMA reversal exit ticket={trade.ticket} price={price:.2f}")
                         events.append({"type": "EMA_REVERSAL", "ticket": trade.ticket, "volume": close_vol, "pnl": pnl})
 
-        # Nếu lệnh đã đóng hết volume, thực hiện finalize (ghi nhận vào RiskManager)
+        # Finalize nếu hết lot
         if trade.lot_remaining <= 0:
             self._finalize_trade(trade, price)
 
         return events
 
     def _tp_hit(self, price: float, tp: float, direction: str) -> bool:
-        if direction == "LONG":
-            return price >= tp
-        return price <= tp
+        return (price >= tp) if direction == "LONG" else (price <= tp)
 
     def _partial_volume(self, trade: ManagedTrade, percent: int) -> float:
-        """Tính toán volume chốt lời theo % lot ban đầu, làm tròn theo lot_step."""
-        # Tính toán dựa trên lot tổng, làm tròn xuống theo lot_step
         raw_vol = (trade.lot_total * percent / 100)
         vol = math.floor(raw_vol / self.lot_step) * self.lot_step
-        
-        # Nếu volume tính ra quá nhỏ (< step), nhưng vẫn còn lot, thì chốt tối thiểu 1 step
         if vol <= 0 and trade.lot_remaining > 0:
             vol = self.lot_step
-            
-        # Đảm bảo không đóng quá số lot còn lại và làm tròn 4 số thập phân
         return min(round(vol, 4), trade.lot_remaining)
 
     def _finalize_trade(self, trade: ManagedTrade, exit_price: float):
-        """Kết thúc theo dõi lệnh và gửi dữ liệu sang RiskManager."""
+        """Kết thúc theo dõi lệnh và ghi nhận kết quả vào RiskManager."""
         if trade.lot_remaining > 0:
             trade.book_close(trade.lot_remaining, exit_price)
 
-        pnl = trade.realized_pnl
         self.risk_manager.record_trade_result(
-            pnl,
+            trade.realized_pnl,
             direction=trade.direction,
             entry=trade.entry_price,
             exit_price=exit_price,
@@ -211,20 +225,16 @@ class TradeManager:
         self.remove_trade(trade.ticket)
 
     def handle_sl_hit(self, ticket: int, exit_price: float):
-        """Xử lý khi StopLoss được hit (thường gọi từ Event của Broker)."""
         for trade in list(self._trades):
             if trade.ticket == ticket:
                 self._finalize_trade(trade, exit_price)
                 break
 
     def close_all(self):
-        """Đóng khẩn cấp toàn bộ các lệnh đang quản lý."""
         for trade in list(self._trades):
             if trade.lot_remaining > 0:
                 tick = self.connector.get_current_price(trade.symbol)
                 exit_price = (tick["bid"] + tick["ask"]) / 2 if tick else trade.entry_price
                 close_vol = trade.lot_remaining
-                pnl = self._close_and_book(trade, close_vol, exit_price)
-                if pnl is not None:
-                    logger.info(f"Emergency close: ticket={trade.ticket}")
-                    self._finalize_trade(trade, exit_price)
+                self._close_and_book(trade, close_vol, exit_price)
+                self._finalize_trade(trade, exit_price)

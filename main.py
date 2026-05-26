@@ -89,7 +89,29 @@ class ScalpingBot:
 
         acc = self.connector.get_account_info()
         if acc:
-            self.risk_manager.set_session_balance(acc["balance"])
+            self.risk_manager.set_session_balance(acc["balance"])        # ─── MỚI: EQUITY HARD STOP CHECK ──────────────────────────────────
+        acc = self.connector.get_account_info()
+        if acc:
+            equity = acc.get("equity", 0)
+            can_continue, reason = self.risk_manager.check_equity_hard_stop(equity)
+            if not can_continue:
+                self._log(f"CRITICAL: {reason}. Closing all positions!", "ERROR")
+                self.trade_manager.close_all()
+                self._state = "STOPPED"
+                self._running = False
+                return
+
+        # ... (phần code cũ)
+
+        # ─── MỚI: LẤY DỮ LIỆU ĐA KHUNG THỜI GIAN ──────────────────────────
+        df_m5 = self.connector.get_ohlcv(self.symbol, self.cfg["timeframe"], self.cfg["ohlcv_bars"])
+        df_h1 = self.connector.get_ohlcv(self.symbol, "H1", 200) # Lấy H1 để check trend
+        
+        # ... (phần lấy spread)
+        
+        # Truyền df_h1 vào signal engine để lọc xu hướng
+
+        # signal = self.signal_engine.get_signal(df_m5, spread, df_h1) # Removed from start() to prevent NameError
 
         self._state = STATE_SCANNING
         self._running = True
@@ -185,7 +207,7 @@ class ScalpingBot:
 
         # ── SESSION GATE ──────────────────────────────────────────────
         force_entry_available = self._paper_force_entry_available()
-        if not is_trading_session(now, self.cfg["sessions"]):
+        if not is_trading_session(now):
             if not (force_entry_available and self.cfg.get("paper_force_ignore_session", True)):
                 return
             self._log("Paper force entry bypassing session gate for test trade.", "WARN")
@@ -214,7 +236,6 @@ class ScalpingBot:
         if df is None or len(df) < 30:
             self._log("Insufficient data", "WARN")
             return
-
         signal = self.signal_engine.get_signal(df, spread)
         if signal.get("direction", NEUTRAL) == NEUTRAL and force_entry_available:
             signal = self.signal_engine.get_forced_signal(

@@ -6,34 +6,27 @@ import queue
 from datetime import datetime, timezone
 from typing import Callable, Dict, Any, List
 
-# ── Design tokens (GitHub Dark Theme) ──────────────────────────────────────────
+# ── Design tokens ─────────────────────────────────────────────────────────────
 C = {
     "bg":          "#0d1117",
     "card":        "#161b22",
     "border":      "#21262d",
     "input":       "#0d1117",
     "header":      "#010409",
-
     "text":        "#e6edf3",
     "sub":         "#8b949e",
     "muted":       "#484f58",
-
     "green":       "#3fb950",
     "green_dim":   "#1a3d26",
     "green_bg":    "#0d2318",
-
     "red":         "#f85149",
     "red_dim":     "#4a1916",
     "red_bg":      "#2a1010",
-
     "yellow":      "#d29922",
     "yellow_bg":   "#2a1e08",
-
     "blue":        "#58a6ff",
     "blue_bg":     "#0c1f38",
-
     "purple":      "#bc8cff",
-
     "SCANNING":    "#58a6ff",
     "ENTRY_READY": "#d29922",
     "IN_TRADE":    "#3fb950",
@@ -53,9 +46,6 @@ FILTERS = {
     "rsi_zone":       ("RSI Zone",        "45-65 long / 35-55 short"),
     "candle_confirm": ("Candle Confirm",  "Body > 50% of range"),
 }
-
-
-# ─── Helper UI components ─────────────────────────────────────────────────────
 
 def _card(parent, title: str, pady_top=10) -> tk.Frame:
     outer = tk.Frame(parent, bg=C["border"], padx=1, pady=1)
@@ -82,7 +72,6 @@ def _row(parent, label: str, value: str = "--", label_w=18) -> tk.Label:
 def _spacer(parent, h=6):
     tk.Frame(parent, bg=C["card"], height=h).pack()
 
-
 class Dashboard:
     def __init__(self, on_start: Callable, on_stop: Callable, on_close_all: Callable):
         self._on_start     = on_start
@@ -98,9 +87,7 @@ class Dashboard:
         self.root.geometry("1200x820")
         self.root.minsize(900, 600)
 
-        # Trạng thái giá để làm hiệu ứng nhấp nháy (Flash)
         self._prev_price = 0.0
-
         self._setup_styles()
         self._build()
         self._poll_ui()
@@ -487,28 +474,19 @@ class Dashboard:
         self._run_on_ui(_apply)
 
     def update_price(self, bid: float, ask: float, spread: float):
-        """Cập nhật giá real-time với hiệu ứng nhấp nháy màu (Flash)."""
         price = (bid + ask) / 2
-        
         def _apply():
-            # Xác định hướng giá thay đổi so với lần cập nhật trước
             if price > self._prev_price:
                 color = C["green"]
             elif price < self._prev_price:
                 color = C["red"]
             else:
                 color = C["text"]
-
             self._price_val.config(text=f"{price:,.2f}", fg=color)
-            
-            # Trả về màu mặc định sau 200ms
             self.root.after(200, lambda: self._price_val.config(fg=C["text"]))
-            
             spread_color = C["red"] if spread > 25 else C["green"]
             self._spread_val.config(text=f"{spread:.0f} pts", fg=spread_color)
-            
             self._prev_price = price
-
         self._run_on_ui(_apply)
 
     def update_filters(self, filters: dict):
@@ -526,7 +504,7 @@ class Dashboard:
         self._run_on_ui(_apply)
 
     def update_positions(self, trades: list):
-        """Cập nhật toàn bộ bảng vị thế."""
+        """Cập nhật danh sách vị thế. P&L khởi tạo là -- chờ update_position_pnl."""
         def _apply():
             for item in self._tree.get_children():
                 self._tree.delete(item)
@@ -539,18 +517,18 @@ class Dashboard:
                     t.ticket,
                     "▲ BUY" if t.direction == "LONG" else "▼ SELL",
                     f"{t.lot_remaining:.2f}",
-                    f"{t.entry_price:.2f}",
-                    f"{t.sl:.2f}",
-                    f"{t.tp1:.2f}",
-                    f"{t.tp2:.2f}",
-                    f"{t.tp3:.2f}",
-                    f"${t.realized_pnl:+,.2f}" if t.realized_pnl else "--",
+                    f"{t.entry_price:.3f}",
+                    f"{t.sl:.3f}",
+                    f"{t.tp1:.3f}",
+                    f"{t.tp2:.3f}",
+                    f"{t.tp3:.3f}",
+                    "--", # P&L sẽ được update real-time qua hàm update_position_pnl
                 )
                 self._tree.insert("", "end", tags=(tag,), values=vals)
         self._run_on_ui(_apply)
 
     def update_position_pnl(self, pnls: dict):
-        """Update real-time P&L cho từng ticket mà không load lại bảng."""
+        """Cập nhật P&L tạm tính (Floating PnL) để khớp với MT5."""
         def _apply():
             for item in self._tree.get_children():
                 vals = self._tree.item(item, "values")
@@ -578,7 +556,7 @@ class Dashboard:
             avg   = stats.get("avg_trade",     0.0)
 
             pnl_color = C["green"] if pnl > 0 else C["red"] if pnl < 0 else C["sub"]
-            self._perf_pnl.config(    text=f"${pnl:+,. queC,.2f}",  fg=pnl_color)
+            self._perf_pnl.config(    text=f"${pnl:+,.2f}",  fg=pnl_color)
             self._perf_trades.config( text=str(total),         fg=C["text"])
             self._perf_wins.config(   text=str(wins),          fg=C["green"] if wins > 0 else C["muted"])
             self._perf_losses.config( text=str(loss),          fg=C["red"]   if loss > 0 else C["muted"])
