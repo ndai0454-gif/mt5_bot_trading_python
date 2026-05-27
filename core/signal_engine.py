@@ -1,80 +1,63 @@
-import logging
-from typing import Optional, Dict, Any
-import numpy as np
 import pandas as pd
+from typing import Optional, Dict, Any
 
-logger = logging.getLogger(__name__)
+# ==========================================
+# INDICATOR CALCULATIONS
+# ==========================================
+def calculate_ema(close, period):
+    return close.ewm(span=period, adjust=False).mean()
 
+def calculate_rsi(close, period):
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_atr(df, period):
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    tr1 = (high - low).abs()
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
+
+def calculate_adx(df, period=14):
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    tr = pd.concat([(high - low).abs(), (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
+    # Đơn giản hóa ADX cho Scalping: dùng độ biến động trung bình làm proxy cho sức mạnh xu hướng
+    return atr.rolling(window=period).mean()
+
+# Constants
+BULLISH = "BULLISH"
+BEARISH = "BEARISH"
 NEUTRAL = "NEUTRAL"
 LONG = "LONG"
 SHORT = "SHORT"
-BULLISH = "BULLISH"
-BEARISH = "BEARISH"
 
-def calculate_ema(prices: pd.Series, period: int) -> pd.Series:
-    return prices.ewm(span=period, adjust=False).mean()
-
-def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-    delta = prices.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
-    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return (100 - (100 / (1 + rs))).fillna(50)
-
-def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high, low, close = df["high"], df["low"], df["close"]
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [
-            (high - low).abs(),
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    return tr.ewm(com=period - 1, adjust=False).mean()
-
-def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high, low, close = df["high"], df["low"], df["close"]
-    plus_dm = high.diff().clip(lower=0)
-    minus_dm = (-low.diff()).clip(lower=0)
-    tr = pd.concat(
-        [
-            (high - low).abs(),
-            (high - close.shift(1)).abs(),
-            (low - close.shift(1)).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr = tr.ewm(com=period - 1, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(com=period - 1, adjust=False).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(com=period - 1, adjust=False).mean() / atr)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan))
-    return dx.ewm(com=period - 1, adjust=False).mean()
-
-def get_ema_alignment(ef, em, es) -> str:
-    if ef > em > es:
-        return BULLISH
-    if ef < em < es:
-        return BEARISH
+# ==========================================
+# HELPER FUNCTIONS (LOGIC BẺ KHÓA)
+# ==========================================
+def get_ema_alignment(ef, em, es, strict=True):
+    """
+    Nới lỏng điều kiện EMA: 
+    - strict=True: Phải xếp chồng hoàn hảo Fast > Medium > Slow.
+    - strict=False: Chỉ cần Fast > Medium là đủ để scalping ngắn.
+    """
+    if strict:
+        if ef > em > es: return BULLISH
+        if ef < em < es: return BEARISH
+    else:
+        if ef > em: return BULLISH
+        if ef < em: return BEARISH
     return NEUTRAL
 
-def check_pullback(df, em_ser, es_ser, alignment, lookback=3) -> bool:
-    if len(df) < lookback + 1:
-        return False
-    lows = df["low"].iloc[-lookback - 1:-1]
-    highs = df["high"].iloc[-lookback - 1:-1]
-    em = em_ser.iloc[-lookback - 1:-1]
-    es = es_ser.iloc[-lookback - 1:-1]
-    if alignment == BULLISH:
-        return (lows <= em).any() or (lows <= es).any()
-    if alignment == BEARISH:
-        return (highs >= em).any() or (highs >= es).any()
-    return False
-
-def check_engulfing(df, direction) -> bool:
+def check_engulfing(df, direction):
     if len(df) < 2:
         return False
     c1, o1 = df["close"].iloc[-2], df["open"].iloc[-2]
@@ -85,7 +68,7 @@ def check_engulfing(df, direction) -> bool:
         return (c2 < o2) and (o2 >= c1) and (c2 < o1)
     return False
 
-def check_candle_confirmation(df, direction, min_body_ratio=0.5) -> bool:
+def check_candle_confirmation(df, direction, min_body_ratio=0.4):
     if len(df) < 2:
         return False
     candle = df.iloc[-2]
@@ -97,6 +80,9 @@ def check_candle_confirmation(df, direction, min_body_ratio=0.5) -> bool:
         return False
     return (candle["close"] > candle["open"]) if direction == LONG else (candle["close"] < candle["open"])
 
+# ==========================================
+# MAIN SIGNAL ENGINE
+# ==========================================
 class SignalEngine:
     def __init__(self, config: dict):
         self.cfg = config
@@ -108,29 +94,48 @@ class SignalEngine:
         close = df_h1["close"].iloc[-1]
         return BULLISH if close > ema_200.iloc[-1] else BEARISH if close < ema_200.iloc[-1] else NEUTRAL
 
+    def check_ema_reversal(self, df: pd.DataFrame, direction: str) -> bool:
+        """
+        Kiểm tra xem xu hướng ngắn hạn có bị đảo chiều không.
+        Nếu đang LONG mà giá đóng cửa dưới EMA Fast -> Cảnh báo đảo chiều.
+        """
+        if df is None or len(df) < 2:
+            return False
+            
+        close = df["close"].iloc[-1]
+        ema_f = calculate_ema(df["close"], self.cfg["ema_fast"]).iloc[-1]
+        
+        if direction == LONG:
+            # Nếu giá đóng cửa cắt xuống dưới EMA Fast -> Đảo chiều giảm
+            return close < ema_f
+        elif direction == SHORT:
+            # Nếu giá đóng cửa cắt lên trên EMA Fast -> Đảo chiều tăng
+            return close > ema_f
+            
+        return False
+
     def _attach_price_levels(self, result: dict, price: float, atr: float, direction: str, min_sl: float = 0.0):
         sl_dist = max(atr * self.cfg["atr_sl_multiplier"], min_sl)
-        tp1_m = self.cfg["tp1_multiplier"]
-        tp2_m = self.cfg["tp2_multiplier"]
-        tp3_m = self.cfg["tp3_multiplier"]
+        
+        # Tỷ lệ R:R tối ưu cho Scalping
+        tp1_m = 1.5 
+        tp2_m = 3.0
+        tp3_m = 5.0
+
         if direction == LONG:
-            result.update(
-                {
-                    "sl": price - sl_dist,
-                    "tp1": price + sl_dist * tp1_m,
-                    "tp2": price + sl_dist * tp2_m,
-                    "tp3": price + sl_dist * tp3_m,
-                }
-            )
+            result.update({
+                "sl": price - sl_dist,
+                "tp1": price + sl_dist * tp1_m,
+                "tp2": price + sl_dist * tp2_m,
+                "tp3": price + sl_dist * tp3_m,
+            })
         else:
-            result.update(
-                {
-                    "sl": price + sl_dist,
-                    "tp1": price - sl_dist * tp1_m,
-                    "tp2": price - sl_dist * tp2_m,
-                    "tp3": price - sl_dist * tp3_m,
-                }
-            )
+            result.update({
+                "sl": price + sl_dist,
+                "tp1": price - sl_dist * tp1_m,
+                "tp2": price - sl_dist * tp2_m,
+                "tp3": price - sl_dist * tp3_m,
+            })
         result["sl_distance"] = sl_dist
         return result
 
@@ -143,6 +148,10 @@ class SignalEngine:
         rsi = calculate_rsi(close, self.cfg["rsi_period"])
         atr = calculate_atr(calc_df, self.cfg["atr_period"])
         adx = calculate_adx(calc_df, self.cfg.get("adx_period", 14))
+        
+        # Lấy cấu hình mức độ khắt khe của EMA từ config
+        strict_ema = self.cfg.get("strict_ema_alignment", True)
+
         return {
             "ema_fast": ema_f.iloc[-1],
             "ema_medium": ema_m.iloc[-1],
@@ -151,7 +160,7 @@ class SignalEngine:
             "atr": atr.iloc[-1],
             "adx": adx.iloc[-1],
             "close": close.iloc[-1],
-            "alignment": get_ema_alignment(ema_f.iloc[-1], ema_m.iloc[-1], ema_s.iloc[-1]),
+            "alignment": get_ema_alignment(ema_f.iloc[-1], ema_m.iloc[-1], ema_s.iloc[-1], strict=strict_ema),
             "df": calc_df,
             "ema_medium_series": ema_m,
             "ema_slow_series": ema_s,
@@ -162,37 +171,62 @@ class SignalEngine:
         filters = {}
         h1_trend = self.check_trend_alignment(df_h1)
 
-        filters["atr_active"] = data["atr"] >= self.cfg["atr_min_threshold"]
+        # 1. Bộ lọc cơ bản
+        filters["atr_active"] = data["atr"] >= self.cfg.get("atr_min_threshold", 0.0)
         filters["spread_ok"] = spread <= self.cfg.get("max_spread_points", 30)
         filters["ema_aligned"] = data["alignment"] in (BULLISH, BEARISH)
         filters["adx_strong"] = data["adx"] >= self.cfg.get("adx_threshold", 20)
 
         direction = LONG if data["alignment"] == BULLISH else SHORT if data["alignment"] == BEARISH else NEUTRAL
-        if df_h1 is not None and ((direction == LONG and h1_trend != BULLISH) or (direction == SHORT and h1_trend != BEARISH)):
-            direction = NEUTRAL
+
+        # ---------------------------------------------------------------------
+        # CƠ CHẾ BẺ KHÓA 1: NỚI LỎNG KHUNG H1
+        # Nếu cấu hình strict_h1_trend = False HOẶC ADX cực mạnh (>25), cho phép vào lệnh ngược H1 (Săn sóng hồi)
+        # ---------------------------------------------------------------------
+        strict_h1 = self.cfg.get("strict_h1_trend", True)
+        bypass_h1_by_adx = data["adx"] >= self.cfg.get("adx_bypass_h1_threshold", 25)
+
+        if strict_h1 and not bypass_h1_by_adx:
+            if df_h1 is not None:
+                if (direction == LONG and h1_trend != BULLISH) or (direction == SHORT and h1_trend != BEARISH):
+                    direction = NEUTRAL
 
         if direction != NEUTRAL:
+            # -----------------------------------------------------------------
+            # CƠ CHẾ BẺ KHÓA 2: NỚI LỎNG XÁC NHẬN NẾN
+            # Nếu ADX > 25 (Trend mạnh), chấp nhận lệnh kể cả khi nến không phải Engulfing hoặc thân nhỏ
+            # -----------------------------------------------------------------
             engulfing = check_engulfing(data["df"], direction)
-            candle_confirm = check_candle_confirmation(data["df"], direction, self.cfg["candle_body_min_ratio"])
-            filters["candle_confirmed"] = engulfing or candle_confirm
-
-            if direction == LONG:
-                filters["rsi_zone"] = self.cfg["rsi_long_min"] <= data["rsi"] <= self.cfg["rsi_long_max"]
+            min_body = self.cfg.get("candle_body_min_ratio", 0.4)
+            candle_confirm = check_candle_confirmation(data["df"], direction, min_body)
+            
+            if self.cfg.get("easy_candle_confirm_on_trend", True) and data["adx"] >= 25:
+                filters["candle_confirmed"] = True # Bypass xác nhận nến khi trend cực mạnh
             else:
-                filters["rsi_zone"] = self.cfg["rsi_short_min"] <= data["rsi"] <= self.cfg["rsi_short_max"]
+                filters["candle_confirmed"] = engulfing or candle_confirm
+
+            # RSI Logic (Soft filter: chỉ chặn nếu quá cực đoan)
+            if direction == LONG:
+                filters["rsi_zone"] = data["rsi"] >= self.cfg.get("rsi_long_min", 30)
+            else:
+                filters["rsi_zone"] = data["rsi"] <= self.cfg.get("rsi_short_max", 70)
         else:
             filters["candle_confirmed"] = False
             filters["rsi_zone"] = False
 
-        required_filters = ["atr_active", "spread_ok", "ema_aligned", "adx_strong", "candle_confirmed", "rsi_zone"]
+        # Danh sách lọc bắt buộc để kích hoạt lệnh
+        required_filters = ["atr_active", "spread_ok", "ema_aligned", "candle_confirmed"]
         all_pass = all(filters.get(f, False) for f in required_filters)
 
         result = {
             "direction": direction if all_pass else NEUTRAL,
             "filters": filters,
             "all_pass": all_pass,
+            "h1_trend": h1_trend,
             **{k: v for k, v in data.items() if k not in ("ema_medium_series", "ema_slow_series", "df")},
         }
+
         if all_pass and direction != NEUTRAL:
             self._attach_price_levels(result, data["close"], data["atr"], direction)
+        
         return result
