@@ -1,6 +1,10 @@
 {
+    "symbol": "XAUUSD",
+    "magic_number": 123456,
+    "polling_interval_scan_ms": 1000,
     "risk_per_trade": 1.0,
     "max_drawdown_lock": 10.0,
+    "daily_max_loss_pct": 10.0,
     "ema_fast": 10,
     "ema_medium": 20,
     "ema_slow": 50,
@@ -13,12 +17,12 @@
     "atr_period": 14,
     "atr_sl_multiplier": 2.0,
     "atr_min_threshold": 0.2,
-    "adx_threshold": 15,
-    "candle_body_min_ratio": 0.4,
-    "tp1_multiplier": 1.5,
+    "adx_threshold": 20,
+    "candle_body_min_ratio": 0.5,
+    "tp1_multiplier": 1.2,
     "tp2_multiplier": 3.0,
     "tp3_multiplier": 5.0,
-    "max_spread_points": 40,
+    "max_spread_points": 30,
     "sessions": [
         {
             "name": "London",
@@ -31,8 +35,8 @@
             "end": "20:00"
         }
     ],
-    "sideway_mode_enabled": true,
-    "dca_positive_enabled": true,
+    "sideway_mode_enabled": false,
+    "dca_positive_enabled": false,
     "dca_max_layers": 3,
     "dca_lot_multiplier": 1.5
 }
