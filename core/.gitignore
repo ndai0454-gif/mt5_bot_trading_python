@@ -1,0 +1,8 @@
+# Bỏ qua file cấu hình chứa thông tin nhạy cảm
+config.json
+# Bỏ qua file kết quả backtest
+backtest_results.csv
+# Bỏ qua thư mục cache của Python
+__pycache__/
+*.pyc
+.vscode/
