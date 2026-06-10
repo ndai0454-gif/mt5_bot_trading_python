@@ -90,6 +90,13 @@ class RiskManager:
         if pnl > 0: self.consecutive_losses = 0
         elif pnl < 0: self.consecutive_losses += 1
 
+    def record_group_result(self, group_id, pnl):
+        """
+        Records the result of a trade group. 
+        Since group results are aggregated, we use record_trade_result to update balance.
+        """
+        self.record_trade_result(pnl)
+
     def is_daily_limit_reached(self):
         if self.daily_start_balance <= 0: return False
         limit = self.daily_start_balance * (self.daily_max_loss_pct / 100.0)

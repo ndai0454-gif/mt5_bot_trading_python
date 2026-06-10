@@ -242,14 +242,11 @@ def check_pinbar(df):
     
     return "LONG" if is_bull_pin else "SHORT" if is_bear_pin else None
 
-# Thêm hàm tính phân kỳ RSI
 def check_rsi_divergence(df, direction):
     if len(df) < 20: return False
     close = df["close"]
     rsi = calculate_rsi(close, 14)
     
-    # Tìm 2 đáy/đỉnh gần nhất của giá và RSI
-    # Đơn giản hóa: So sánh nến hiện tại với nến cách đây 5-10 phiên
     price_now = close.iloc[-1]
     rsi_now = rsi.iloc[-1]
     
@@ -269,40 +266,23 @@ class SignalEngine:
         self.cfg = config
 
     def detect_momentum_candle(self, df, window=10, multiplier=2.0):
-        """
-        Nhận diện nến Momentum: Thân nến lớn hơn multiplier lần trung bình 10 nến trước.
-        """
         return detect_momentum_candle(df, window, multiplier)
 
     def detect_wedge_pattern(self, df, window=15):
-        """
-        Tìm kiếm sự hội tụ giá (Wedge).
-        """
         return detect_wedge_pattern(df, window)
 
     def detect_channel_pattern(self, df, window=15):
-        """
-        Tìm kiếm kênh giá (Channel).
-        """
         return detect_channel_pattern(df, window)
 
     def calculate_price_clusters(self, df, window=100, cluster_size=0.001):
-        """
-        Xác định các vùng giá (Clusters) nơi giá phản ứng nhiều lần.
-        """
         return calculate_price_clusters(df, window, cluster_size)
 
     def calculate_all_regimes(self, df: pd.DataFrame) -> pd.Series:
-        """
-        Nâng cấp Giai đoạn 3: Xác định Sideway dựa trên Cấu trúc & Cụm giá
-        """
-        # 1. ADX & BB Squeeze (Nền tảng)
         adx = calculate_adx(df)
         upper, lower, bandwidth = calculate_bollinger_bands(df)
         avg_bandwidth = bandwidth.rolling(window=100).mean()
         is_squeeze = bandwidth < avg_bandwidth
         
-        # 2. Market Structure Analysis (Đỉnh/Đáy)
         structure_regimes = []
         for i in range(len(df)):
             if i < 40:
@@ -311,45 +291,25 @@ class SignalEngine:
                 structure_regimes.append(detect_market_structure(df.iloc[:i+1]))
         
         regimes_series = pd.Series(structure_regimes, index=df.index)
-        
-        # 3. Cluster Stability (Kiểm tra xem giá có đang tôn trọng vùng cụm không)
-        # Chỉ tính cho nến hiện tại trong loop, nhưng ở đây ta vectorize bằng cách 
-        # kiểm tra xem range hiện tại có nằm trong vùng cluster lịch sử không
-        # (Đơn giản hóa cho vectorized: dùng độ lệch chuẩn thấp)
         volatility = df["close"].rolling(window=20).std()
-        is_stable = volatility < (df["close"].mean() * 0.002) # Biến động < 0.2% giá
+        is_stable = volatility < (df["close"].mean() * 0.002)
         
-        # LOGIC KẾT HỢP:
-        # Phải là SIDEWAY về cấu trúc VÀ (ADX thấp HOẶC BB Squeeze) VÀ Biến động ổn định
         is_sideway = (regimes_series == SIDEWAY) & ((adx < 25) | is_squeeze) & is_stable
-        
         final_regimes = pd.Series(TREND, index=df.index)
         final_regimes[is_sideway] = SIDEWAY
         
         return final_regimes
 
     def get_market_regime(self, df: pd.DataFrame) -> str:
-        """
-        Phân tích đa yếu tố để xác định thị trường TREND hay SIDEWAY
-        """
         if len(df) < 30:
             return TREND
 
-        # 1. ADX Check (Sức mạnh xu hướng)
         adx_series = calculate_adx(df)
         current_adx = adx_series.iloc[-1]
-        
-        # 2. EMA Slope Check (Độ dốc)
         slope = calculate_ema_slope(df)
-        
-        # 3. Range Bound Check (Vùng biên)
         _, _, r_size = identify_range_bound(df)
         
-        # LOGIC QUYẾT ĐỊNH:
-        # Ngưỡng ADX chuẩn là 25. Dưới 25 thường là sideway.
         is_adx_low = current_adx < 25 if not pd.isna(current_adx) else False
-        
-        # Độ dốc phẳng: so sánh với 10% độ lệch chuẩn của giá để chuẩn hóa mọi cặp tiền
         volatility = df["close"].std()
         is_slope_flat = abs(slope) < (volatility * 0.1) if not pd.isna(volatility) else False
         
@@ -359,34 +319,20 @@ class SignalEngine:
         return TREND
 
     def check_sideway_signals(self, df: pd.DataFrame) -> Optional[str]:
-        """
-        Nâng cấp Logic Vào Lệnh:
-        - Lọc Momentum cực mạnh (Hủy Mean Reversion)
-        - Yêu cầu xác nhận Wedge/Channel
-        - Yêu cầu RSI Divergence hoặc nến đảo chiều mạnh
-        """
         if len(df) < 30: return None
-        
-        # 1. Lọc Momentum: Nếu nến hiện tại quá mạnh -> Breakout -> Hủy Mean Reversion
         if detect_momentum_candle(df):
             return None
         
         high_b, low_b, r_size = identify_range_bound(df)
         close = df["close"].iloc[-1]
         rsi = calculate_rsi(df["close"], 14).iloc[-1]
-        
-        # Kiểm tra mô hình hội tụ (Wedge)
         is_wedge = detect_wedge_pattern(df)
         
-        # --- PHƯƠNG ÁN A: MEAN REVERSION (Đánh biên) ---
-        # Buy: Chạm hỗ trợ + (RSI < 30 hoặc Nến đảo chiều) + (Bắt buộc Wedge hoặc RSI cực thấp)
         if close <= low_b * 1.001:
             pin = check_pinbar(df)
-            # Thắt chặt: Phải có Wedge HOẶC RSI cực đoan (< 20)
             if (rsi < 30 or pin == "LONG" or check_engulfing(df, LONG)) and (is_wedge or rsi < 20):
                 return LONG
                 
-        # Sell: Chạm kháng cự + (RSI > 70 hoặc Nến đảo chiều) + (Bắt buộc Wedge hoặc RSI cực cao)
         if close >= high_b * 0.999:
             pin = check_pinbar(df)
             if (rsi > 70 or pin == "SHORT" or check_engulfing(df, SHORT)) and (is_wedge or rsi > 80):
@@ -402,47 +348,45 @@ class SignalEngine:
         return BULLISH if close > ema_200.iloc[-1] else BEARISH if close < ema_200.iloc[-1] else NEUTRAL
 
     def check_ema_reversal(self, df: pd.DataFrame, direction: str) -> bool:
-        """
-        Kiểm tra xem xu hướng ngắn hạn có bị đảo chiều không.
-        Nếu đang LONG mà giá đóng cửa dưới EMA Fast -> Cảnh báo đảo chiều.
-        """
         if df is None or len(df) < 2:
             return False
-            
         close = df["close"].iloc[-1]
         ema_f = calculate_ema(df["close"], self.cfg["ema_fast"]).iloc[-1]
-        
         if direction == LONG:
-            # Nếu giá đóng cửa cắt xuống dưới EMA Fast -> Đảo chiều giảm
             return close < ema_f
         elif direction == SHORT:
-            # Nếu giá đóng cửa cắt lên trên EMA Fast -> Đảo chiều tăng
             return close > ema_f
-            
         return False
 
-    def _attach_price_levels(self, result: dict, price: float, atr: float, direction: str, min_sl: float = 0.0):
-        sl_dist = max(atr * self.cfg["atr_sl_multiplier"], min_sl)
+    def _attach_price_levels(self, result, price, atr, direction):
+        """
+        NÂNG CẤP: Tính toán mức SL và TP dựa trên ATR.
+        Sử dụng hệ số K cho TP1 thấp (0.8) để tối ưu Win Rate.
+        """
+        # Tính khoảng cách SL an toàn
+        sl_dist = atr * self.cfg["atr_sl_multiplier"]
         
-        # Tỷ lệ R:R tối ưu cho Scalping
-        tp1_m = 1.5 
-        tp2_m = 3.0
-        tp3_m = 5.0
-
+        # Hệ số TP (Risk:Reward)
+        tp1_multiplier = 0.8 
+        tp2_multiplier = 2.0
+        tp3_multiplier = 4.0
+        
         if direction == LONG:
             result.update({
                 "sl": price - sl_dist,
-                "tp1": price + sl_dist * tp1_m,
-                "tp2": price + sl_dist * tp2_m,
-                "tp3": price + sl_dist * tp3_m,
+                "tp1": price + (sl_dist * tp1_multiplier),
+                "tp2": price + (sl_dist * tp2_multiplier),
+                "tp3": price + (sl_dist * tp3_multiplier)
             })
         else:
             result.update({
                 "sl": price + sl_dist,
-                "tp1": price - sl_dist * tp1_m,
-                "tp2": price - sl_dist * tp2_m,
-                "tp3": price - sl_dist * tp3_m,
+                "tp1": price - (sl_dist * tp1_multiplier),
+                "tp2": price - (sl_dist * tp2_multiplier),
+                "tp3": price - (sl_dist * tp3_multiplier)
             })
+        
+        # Lưu lại khoảng cách SL để dùng cho tính toán volume/risk
         result["sl_distance"] = sl_dist
         return result
 
@@ -456,7 +400,6 @@ class SignalEngine:
         atr = calculate_atr(calc_df, self.cfg["atr_period"])
         adx = calculate_adx(calc_df, self.cfg.get("adx_period", 14))
         
-        # Lấy cấu hình mức độ khắt khe của EMA từ config
         strict_ema = self.cfg.get("strict_ema_alignment", True)
 
         return {
@@ -478,7 +421,6 @@ class SignalEngine:
         filters = {}
         h1_trend = self.check_trend_alignment(df_h1)
 
-        # 1. Bộ lọc cơ bản
         filters["atr_active"] = data["atr"] >= self.cfg.get("atr_min_threshold", 0.0)
         filters["spread_ok"] = spread <= self.cfg.get("max_spread_points", 30)
         filters["ema_aligned"] = data["alignment"] in (BULLISH, BEARISH)
@@ -486,10 +428,6 @@ class SignalEngine:
 
         direction = LONG if data["alignment"] == BULLISH else SHORT if data["alignment"] == BEARISH else NEUTRAL
 
-        # ---------------------------------------------------------------------
-        # CƠ CHẾ BẺ KHÓA 1: NỚI LỎNG KHUNG H1
-        # Nếu cấu hình strict_h1_trend = False HOẶC ADX cực mạnh (>25), cho phép vào lệnh ngược H1 (Săn sóng hồi)
-        # ---------------------------------------------------------------------
         strict_h1 = self.cfg.get("strict_h1_trend", True)
         bypass_h1_by_adx = data["adx"] >= self.cfg.get("adx_bypass_h1_threshold", 25)
 
@@ -499,20 +437,15 @@ class SignalEngine:
                     direction = NEUTRAL
 
         if direction != NEUTRAL:
-            # -----------------------------------------------------------------
-            # CƠ CHẾ BẺ KHÓA 2: NỚI LỎNG XÁC NHẬN NẾN
-            # Nếu ADX > 25 (Trend mạnh), chấp nhận lệnh kể cả khi nến không phải Engulfing hoặc thân nhỏ
-            # -----------------------------------------------------------------
             engulfing = check_engulfing(data["df"], direction)
             min_body = self.cfg.get("candle_body_min_ratio", 0.4)
             candle_confirm = check_candle_confirmation(data["df"], direction, min_body)
             
             if self.cfg.get("easy_candle_confirm_on_trend", True) and data["adx"] >= 25:
-                filters["candle_confirmed"] = True # Bypass xác nhận nến khi trend cực mạnh
+                filters["candle_confirmed"] = True
             else:
                 filters["candle_confirmed"] = engulfing or candle_confirm
 
-            # RSI Logic (Soft filter: chỉ chặn nếu quá cực đoan)
             if direction == LONG:
                 filters["rsi_zone"] = data["rsi"] >= self.cfg.get("rsi_long_min", 30)
             else:
@@ -521,7 +454,6 @@ class SignalEngine:
             filters["candle_confirmed"] = False
             filters["rsi_zone"] = False
 
-        # Danh sách lọc bắt buộc để kích hoạt lệnh
         required_filters = ["atr_active", "spread_ok", "ema_aligned", "candle_confirmed"]
         all_pass = all(filters.get(f, False) for f in required_filters)
 

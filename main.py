@@ -134,6 +134,12 @@ class ScalpingBot:
         if self._dashboard:
             self._dashboard.update_time(now)
 
+        # --- Trade Management ---
+        if self.trade_manager:
+            current_price = self.connector.get_current_price(self.symbol).get("bid") if self.connector.get_current_price(self.symbol) else None
+            if current_price:
+                self.trade_manager.monitor_and_manage_trades(current_price)
+
         acc = self.connector.get_account_info()
         if acc and self._dashboard:
             self._dashboard.update_account(
